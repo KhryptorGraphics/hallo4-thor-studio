@@ -240,8 +240,13 @@ async def live_offer(offer: OfferRequest) -> dict[str, str]:
         def on_track(track: MediaStreamTrack) -> None:
             if track.kind == "video":
                 session.has_video = True
+                # buffered=False: deliver only the LATEST frame and drop the backlog.
+                # drive() (~12 fps) is slower than the webcam (~30 fps), so a buffered
+                # relay queues frames unbounded -> tens of GB leaked over a session.
+                # Dropping stale frames is also the right real-time-mirror behaviour.
                 pc.addTrack(_VideoTransformTrack(
-                    session.relay.subscribe(track), video_engine, lambda: session.latest_audio))
+                    session.relay.subscribe(track, buffered=False), video_engine,
+                    lambda: session.latest_audio))
             elif track.kind == "audio":
                 session.has_audio = True
                 pc.addTrack(_AudioTransformTrack(
