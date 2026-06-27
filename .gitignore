@@ -9,6 +9,9 @@ studio_data
 node_modules
 *.tsbuildinfo
 
+# Local auth secret (never commit to the public repo)
+token.md
+
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
