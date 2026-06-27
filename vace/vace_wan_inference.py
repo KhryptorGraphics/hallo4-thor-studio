@@ -409,6 +409,47 @@ def save_chunk_clip(chunk, save_file, fps, audio_path, start_sec, dur):
             logging.warning(f"Chunk audio mux failed ({exc}); leaving chunk silent.")
     logging.info(f"CHUNK_SAVED {os.path.basename(save_file)}")
 
+
+_PIPELINE_CACHE = {}
+
+
+def build_pipeline(args, cfg=None, device=0, rank=0):
+    """Construct (or reuse) the WanVace pipeline.
+
+    A module-level cache keyed by the checkpoint paths keeps the model resident
+    across calls, so the studio's in-process engine can run many clips without
+    reloading ~6 GB of weights each time. For the one-shot CLI path the cache is
+    a harmless single entry freed on process exit.
+    """
+    args = argparse.Namespace(**args) if isinstance(args, dict) else args
+    if cfg is None:
+        cfg = WAN_CONFIGS[args.model_name]
+    key = (
+        args.model_name, str(args.ckpt_dir), str(args.model_path),
+        bool(args.t5_cpu), int(args.ulysses_size), int(args.ring_size),
+    )
+    cached = _PIPELINE_CACHE.get(key)
+    if cached is not None:
+        logging.info("Reusing resident WanVace pipeline.")
+        return cached
+    logging.info("Creating WanT2V pipeline.")
+    wan_vace = WanVace(
+        config=cfg,
+        checkpoint_dir=args.ckpt_dir,
+        device_id=device,
+        rank=rank,
+        t5_fsdp=args.t5_fsdp,
+        dit_fsdp=args.dit_fsdp,
+        use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
+        t5_cpu=args.t5_cpu,
+        model_path=args.model_path,
+        enable_skeleton_cross_attn=True,
+        enable_audio_cross_attn=True,
+    )
+    _PIPELINE_CACHE[key] = wan_vace
+    return wan_vace
+
+
 def main(args):
     args = argparse.Namespace(**args) if isinstance(args, dict) else args
     args = validate_args(args)
@@ -461,20 +502,7 @@ def main(args):
         src_masks = [None] * len(prompts)
 
 
-    logging.info("Creating WanT2V pipeline.")
-    wan_vace = WanVace(
-        config=cfg,
-        checkpoint_dir=args.ckpt_dir,
-        device_id=device,
-        rank=rank,
-        t5_fsdp=args.t5_fsdp,
-        dit_fsdp=args.dit_fsdp,
-        use_usp=(args.ulysses_size > 1 or args.ring_size > 1),
-        t5_cpu=args.t5_cpu,
-        model_path=args.model_path,
-        enable_skeleton_cross_attn=True,
-        enable_audio_cross_attn=True
-    )
+    wan_vace = build_pipeline(args, cfg, device, rank)
 
     logging.info(f"Starting Inference Cases. Total count: {len(prompts)}")
 

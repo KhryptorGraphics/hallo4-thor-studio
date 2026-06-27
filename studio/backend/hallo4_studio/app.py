@@ -4,6 +4,7 @@ import asyncio
 import base64
 import glob
 import json
+import logging
 import os
 import platform
 import re
@@ -518,6 +519,44 @@ def prepare_audio_sync(job: JobState) -> list[str]:
     return command
 
 
+class _JobLogHandler(logging.Handler):
+    """Forward Python logging records from in-process inference into job logs."""
+
+    def __init__(self, job: JobState) -> None:
+        super().__init__()
+        self.job = job
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.job.append_log(record.getMessage())
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run_inprocess_sync(job: JobState) -> None:
+    """Run inference in this process with a resident (cached) WanVace model.
+
+    Reuses the exact CLI flags the subprocess path would have used, so behaviour
+    matches; the first job loads the model, later jobs reuse it (see
+    vace.vace_wan_inference.build_pipeline cache). Raises on failure."""
+    from vace.vace_wan_inference import get_parser
+    from vace.vace_wan_inference import main as inference_main
+
+    flags = job.info.command[3:]  # strip [python, -m, vace.vace_wan_inference]
+    namespace = get_parser().parse_args(flags)
+    handler = _JobLogHandler(job)
+    handler.setLevel(logging.INFO)
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    try:
+        inference_main(namespace)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+
 async def run_job(job: JobState) -> None:
     if job.cancel_requested:
         job.set_status("cancelled")
@@ -540,6 +579,21 @@ async def run_job(job: JobState) -> None:
             if job.cancel_requested:
                 job.set_status("cancelled")
                 return
+
+            if os.getenv("HALLO4_INPROCESS_ENGINE") == "1":
+                # Resident-model path: keep WanVace loaded across clips (no ~6 GB
+                # reload per job). Cannot be interrupted mid-round; cancel is honoured
+                # only at boundaries. Default path remains the subprocess below.
+                try:
+                    await asyncio.to_thread(run_inprocess_sync, job)
+                    job.info.returncode = 0
+                    job.info.artifacts = list_artifacts(job.info.id)
+                    job.set_status("succeeded")
+                except Exception as exc:  # noqa: BLE001
+                    job.info.artifacts = list_artifacts(job.info.id)
+                    job.set_status("failed", f"{type(exc).__name__}: {exc}")
+                return
+
             process = await asyncio.create_subprocess_exec(
                 *job.info.command,
                 cwd=str(REPO_ROOT),

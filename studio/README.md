@@ -71,6 +71,23 @@ disturb the locally-built `onnxruntime-gpu`. A longer (30s+) clean reference cli
 gives a better target timbre. If conversion fails the job falls back to the user's
 own voice (logged). Override the device with `HALLO4_VC_DEVICE`.
 
+## Performance: resident model
+
+By default each job runs as a subprocess that reloads ~6 GB of weights — fine for
+batch use, slow for the interactive Live loop. Set `HALLO4_INPROCESS_ENGINE=1`
+when launching the backend to keep `WanVace` resident in the server process
+(`vace.vace_wan_inference.build_pipeline` caches it), so only the first clip pays
+the load cost:
+
+```bash
+HALLO4_INPROCESS_ENGINE=1 uvicorn studio.backend.hallo4_studio.app:app --host 0.0.0.0 --port 8443 \
+    --ssl-keyfile studio_data/certs/studio.key --ssl-certfile studio_data/certs/studio.crt
+```
+
+Trade-offs: the model shares the web-server process (a model crash takes the
+server with it), and an in-process job can't be cancelled mid-round (cancel is
+honoured at round boundaries). Jobs are still serialized by the GPU lock.
+
 ## Auth
 
 Set `HALLO4_STUDIO_TOKEN` (bearer) or `HALLO4_STUDIO_USER`/`HALLO4_STUDIO_PASSWORD`
