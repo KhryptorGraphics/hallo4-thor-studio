@@ -673,6 +673,21 @@ def package_checks() -> dict[str, Any]:
 @app.on_event("startup")
 async def startup() -> None:
     load_state()
+    # Opt-in real live-mirror engines (LivePortrait + RVC). Off by default so the
+    # studio starts light; the Mirror tab works in passthrough until enabled.
+    if os.getenv("HALLO4_LIVE_ENGINE") == "1":
+        try:
+            from .live_video_engine import LiveVideoEngine
+            from .rvc_engine import RVCEngine
+
+            use_trt = os.getenv("HALLO4_LIVE_TRT") == "1"
+            set_engines(
+                _ResolvingVideoEngine(LiveVideoEngine(use_trt=use_trt)),
+                _ResolvingRVCEngine(RVCEngine()),
+            )
+            print("Live-mirror engines enabled (LivePortrait + RVC).", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Live engine init failed ({exc}); Mirror falls back to passthrough.", flush=True)
 
 
 @app.get("/api/health", dependencies=[Depends(require_auth)])
@@ -977,6 +992,49 @@ async def get_artifact(job_id: str, name: str) -> FileResponse:
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path, filename=name)
+
+
+# --- Phase 2: live-mirror (WebRTC) + voice enrollment ---
+# Adapters resolve the frontend's upload/model ids to filesystem paths before the
+# engines (which take paths) are warmed/loaded. Mounted before the catch-all "/".
+from .live_session import live_router, set_engines  # noqa: E402
+from .enrollment import enroll_router  # noqa: E402
+
+
+class _ResolvingVideoEngine:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def warmup(self, target_image: str) -> None:
+        resolved = resolve_path(target_image, must_exist=False)
+        self.inner.warmup(str(resolved) if resolved else target_image)
+
+    def drive(self, *args: Any, **kwargs: Any) -> Any:
+        return self.inner.drive(*args, **kwargs)
+
+    @property
+    def ready(self) -> bool:
+        return bool(getattr(self.inner, "ready", False))
+
+
+class _ResolvingRVCEngine:
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def load(self, target_voice: str) -> None:
+        model_dir = DATA_ROOT / "voice_models" / target_voice
+        self.inner.load(str(model_dir) if model_dir.exists() else target_voice)
+
+    def convert_chunk(self, pcm: Any) -> Any:
+        return self.inner.convert_chunk(pcm)
+
+    @property
+    def ready(self) -> bool:
+        return bool(getattr(self.inner, "ready", False))
+
+
+app.include_router(live_router, dependencies=[Depends(require_auth)])
+app.include_router(enroll_router, dependencies=[Depends(require_auth)])
 
 
 frontend_dist = REPO_ROOT / "studio/frontend/dist"

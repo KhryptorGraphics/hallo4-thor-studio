@@ -1,7 +1,16 @@
 # Phase 2 — True Live-Mirror Engine (scope)
 
-> Status: **scoping**. Not built. Phase 1 (record → generate → play on hallo4 with
-> voice cloning) is done on branch `feat/webcam-avatar-studio`.
+> Status: **2a done (GO) + a working 2b–2e skeleton built** on branch
+> `feat/webcam-avatar-studio`. Phase 1 (record → generate → play) also done.
+>
+> **Built (functional):** WebRTC live session (`live_session.py`, 30 fps relay),
+> real LivePortrait reenactment engine (`live_video_engine.py` — real weights,
+> eager ~6 fps@768² / ~9 fps@256²+TRT), RVC engine + offline enrollment job
+> (`rvc_engine.py` / `enrollment.py` — real content encoder, **synthesizer +
+> training still stubbed/passthrough**), frontend "Mirror" mode (`LiveMirror.tsx`).
+> Mounted in `app.py`; real engines gated by `HALLO4_LIVE_ENGINE=1` (else passthrough).
+> **Remaining to be "smooth + real voice":** TRT warp-split for 25+ fps, real
+> Wav2Lip mouth, real RVC synthesizer + training (avoid fairseq), A/V sync.
 >
 > **2a progress:**
 > - **Transport ✅** — `aiortc 1.14 + av 16.1` install cleanly (av bundles ffmpeg →

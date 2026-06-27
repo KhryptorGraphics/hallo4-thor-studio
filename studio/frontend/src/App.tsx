@@ -24,8 +24,9 @@ import {
   Video
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import LiveMirror from "./LiveMirror";
 
-type UploadInfo = {
+export type UploadInfo = {
   id: string;
   filename: string;
   content_type?: string;
@@ -113,6 +114,7 @@ function useStoredState<T>(key: string, initial: T) {
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("live");
+  const [liveEngine, setLiveEngine] = useStoredState<"render" | "live">("hallo4.liveEngine", "render");
   const [authToken, setAuthToken] = useStoredState("hallo4.authToken", "");
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [jobs, setJobs] = useState<JobInfo[]>([]);
@@ -323,14 +325,28 @@ export default function App() {
       </nav>
 
       {tab === "live" && (
-        <LiveStudio
-          api={api}
-          upload={upload}
-          onSubmitted={(id) => {
-            setSelectedJobId(id);
-            setRecentJobs([id, ...recentJobs.filter((existing) => existing !== id)].slice(0, 10));
-          }}
-        />
+        <>
+          <nav className="tabs">
+            <button className={classNames(liveEngine === "render" && "active")} onClick={() => setLiveEngine("render")}>
+              <Video size={16} /> Render (hallo4)
+            </button>
+            <button className={classNames(liveEngine === "live" && "active")} onClick={() => setLiveEngine("live")}>
+              <Radio size={16} /> Mirror (live · beta)
+            </button>
+          </nav>
+          {liveEngine === "render" ? (
+            <LiveStudio
+              api={api}
+              upload={upload}
+              onSubmitted={(id) => {
+                setSelectedJobId(id);
+                setRecentJobs([id, ...recentJobs.filter((existing) => existing !== id)].slice(0, 10));
+              }}
+            />
+          ) : (
+            <LiveMirror api={api} upload={upload} />
+          )}
+        </>
       )}
 
       {tab === "generate" && (
@@ -671,7 +687,7 @@ function LogView({ lines }: { lines: string[] }) {
   );
 }
 
-type Api = <T,>(path: string, init?: RequestInit) => Promise<T>;
+export type Api = <T,>(path: string, init?: RequestInit) => Promise<T>;
 
 function LiveStudio({
   api,
