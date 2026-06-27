@@ -1,0 +1,43 @@
+# Runtime dependencies for Jetson AGX Thor / CUDA 13 / SM110.
+# Torch, torchvision, torchaudio, triton, and decord are installed by scripts/setup_thor_env.sh.
+# The final NumPy line is constrained to 1.26.4 by audio-separator 0.30.2.
+# The original requirements.txt is CUDA 12.1/x86_64 oriented and must not be installed directly.
+
+--extra-index-url https://pypi.jetson-ai-lab.io/sbsa/cu130
+
+accelerate==1.6.0
+aiofiles==23.2.1
+audio-separator==0.30.2
+dashscope==1.25.23
+diffusers==0.33.1
+easydict==1.13
+einops==0.8.1
+fastapi==0.115.12
+flash-attn==2.8.4
+ftfy==6.3.1
+gradio==5.0.0
+huggingface-hub[cli]==0.30.2
+httpx==0.28.1
+icecream==2.1.4
+imageio==2.37.0
+imageio-ffmpeg==0.6.0
+librosa==0.11.0
+matplotlib==3.10.1
+ml_collections==1.1.0
+moviepy==1.0.3
+onnx==1.17.0
+onnx2torch==1.5.15
+onnxruntime-gpu==1.24.0
+opencv-python==4.11.0.86
+python-multipart==0.0.20
+PyYAML==6.0.2
+rotary-embedding-torch==0.6.5
+safetensors==0.5.3
+scikit-image==0.25.2
+soundfile==0.13.1
+timm==1.0.15
+tifffile==2025.3.30
+tokenizers==0.21.1
+tqdm==4.67.1
+transformers==4.51.3
+uvicorn==0.34.2

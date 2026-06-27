@@ -10,6 +10,7 @@ import types
 from contextlib import contextmanager
 from functools import partial
 
+import imageio.v2 as imageio
 import numpy as np
 import torch
 import torch.cuda.amp as amp
@@ -40,6 +41,15 @@ from .modules.model import VaceWanModel
 
 import decord  # isort:skip
 from decord import cpu # isort:skip
+
+
+def _prefer_decord_video_backend():
+    backend = os.getenv("HALLO4_VIDEO_BACKEND", "auto").strip().lower()
+    if backend == "decord":
+        return True
+    if backend == "imageio":
+        return False
+    return os.uname().machine != "aarch64"
 
 
 class WanVace(nn.Module):
@@ -216,7 +226,7 @@ class WanVace(nn.Module):
     def vace_latent(self, z, m):
         return [torch.cat([zz, mm], dim=0) for zz, mm in zip(z, m)]
 
-    def prepare_source(self, src_video, src_mask, src_ref_images, num_frames, image_size, device):
+    def prepare_source(self, src_video, src_mask, src_ref_images, num_frames, image_size, device, start_frame=0, frame_count=None):
         image_sizes = []
         for i, (sub_src_video, sub_src_mask) in enumerate(zip(src_video, src_mask)):
             if sub_src_video is None:
@@ -224,7 +234,7 @@ class WanVace(nn.Module):
                 src_mask[i] = torch.ones_like(src_video[i], device=device)
                 image_sizes.append(image_size)
             else:
-                src_video[i] = self.load_video(sub_src_video)#c f h w
+                src_video[i] = self.load_video(sub_src_video, start_frame=start_frame, frame_count=frame_count)#c f h w
                 src_video[i] = src_video[i].to(device)
                 src_mask[i] = torch.ones((3,src_video[0].shape[1],image_size[0],image_size[1]), device=device)
                 image_sizes.append(src_video[i].shape[2:])
@@ -257,13 +267,42 @@ class WanVace(nn.Module):
                         src_ref_images[i][j] = ref_img.to(device)
         return src_video, src_mask, src_ref_images, ori_image_sizes
 
-    def load_video(self, video_path):
-        decord.bridge.set_bridge("torch")
+    def load_video(self, video_path, start_frame=0, frame_count=None):
+        decode_error = None
+        start_frame = max(int(start_frame or 0), 0)
+        frame_count = None if frame_count is None else max(int(frame_count), 0)
+        frame_ids = None
+        if _prefer_decord_video_backend():
+            try:
+                decord.bridge.set_bridge("torch")
+                video_reader = decord.VideoReader(uri=video_path, ctx=cpu(0))
+                video_num_frames = len(video_reader)
+                end_frame = video_num_frames if frame_count is None else min(video_num_frames, start_frame + frame_count)
+                frame_ids = list(range(min(start_frame, video_num_frames), end_frame))
+                video = video_reader.get_batch(frame_ids) if frame_ids else None
+            except Exception as exc:
+                decode_error = exc
+                logging.warning("Decord failed to read %s (%s); falling back to imageio.", video_path, exc)
+                video = None
+        else:
+            video = None
 
-        video_reader = decord.VideoReader(uri=video_path, ctx=cpu(0))
-        video_num_frames = len(video_reader)
-
-        video = video_reader.get_batch(list(range(video_num_frames)))
+        if video is None:
+            reader = imageio.get_reader(video_path, "ffmpeg")
+            try:
+                end_frame = None if frame_count is None else start_frame + frame_count
+                frames = []
+                for frame_idx, frame in enumerate(reader):
+                    if frame_idx < start_frame:
+                        continue
+                    if end_frame is not None and frame_idx >= end_frame:
+                        break
+                    frames.append(torch.from_numpy(frame))
+            finally:
+                reader.close()
+            if not frames:
+                raise RuntimeError(f"No frames decoded from {video_path}") from decode_error
+            video = torch.stack(frames, dim=0)
         video = video.permute(3, 0, 1, 2).contiguous()
         video = video.float().div_(127.5).sub_(1.)
 

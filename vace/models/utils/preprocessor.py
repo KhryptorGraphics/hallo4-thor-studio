@@ -2,6 +2,8 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 import math
+import warnings
+import imageio.v2 as imageio
 import librosa
 import subprocess
 
@@ -16,6 +18,16 @@ from einops import rearrange
 from transformers import Wav2Vec2FeatureExtractor
 
 from .wav2vec import Wav2VecModel
+
+
+def _prefer_decord_video_backend():
+    backend = os.getenv("HALLO4_VIDEO_BACKEND", "auto").strip().lower()
+    if backend == "decord":
+        return True
+    if backend == "imageio":
+        return False
+    return os.uname().machine != "aarch64"
+
 
 class VaceImageProcessor(object):
     def __init__(self, downsample=None, seq_len=None):
@@ -248,23 +260,56 @@ class VaceVideoProcessor(object):
 
     def load_video_batch(self, *data_key_batch, crop_box=None, seed=2024, **kwargs):
         rng = np.random.default_rng(seed + hash(data_key_batch[0]) % 10000)
-        # read video
-        import decord
-        decord.bridge.set_bridge('torch')
-        readers = []
-        for data_k in data_key_batch:
-            reader = decord.VideoReader(data_k)
-            readers.append(reader)
+        decode_error = None
+        if _prefer_decord_video_backend():
+            try:
+                # read video
+                import decord
+                decord.bridge.set_bridge('torch')
+                readers = []
+                for data_k in data_key_batch:
+                    reader = decord.VideoReader(data_k)
+                    readers.append(reader)
 
-        fps = readers[0].get_avg_fps()
-        length = min([len(r) for r in readers])
-        frame_timestamps = [readers[0].get_frame_timestamp(i) for i in range(length)]
-        frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
-        h, w = readers[0].next().shape[:2]
-        frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
+                fps = readers[0].get_avg_fps()
+                length = min([len(r) for r in readers])
+                frame_timestamps = [readers[0].get_frame_timestamp(i) for i in range(length)]
+                frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
+                h, w = readers[0].next().shape[:2]
+                frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
 
-        # preprocess video
-        videos = [reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :] for reader in readers]
+                # preprocess video
+                videos = [reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :] for reader in readers]
+            except Exception as exc:
+                decode_error = exc
+                warnings.warn(f"Decord failed to read video batch ({exc}); falling back to imageio.")
+                videos = None
+        else:
+            videos = None
+
+        if videos is None:
+            frame_batches = []
+            fps = None
+            for data_k in data_key_batch:
+                reader = imageio.get_reader(data_k, "ffmpeg")
+                try:
+                    meta = reader.get_meta_data()
+                    fps = fps or meta.get("fps", 24)
+                    frames = [np.asarray(frame) for frame in reader]
+                finally:
+                    reader.close()
+                if not frames:
+                    raise RuntimeError(f"No frames decoded from {data_k}") from decode_error
+                frame_batches.append(frames)
+
+            length = min(len(frames) for frames in frame_batches)
+            frame_timestamps = np.arange(length, dtype=np.float32) / float(fps or 24)
+            h, w = frame_batches[0][0].shape[:2]
+            frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(float(fps or 24), frame_timestamps, h, w, crop_box, rng)
+            videos = [
+                torch.from_numpy(np.stack([frames[i][y1:y2, x1:x2, :] for i in frame_ids], axis=0))
+                for frames in frame_batches
+            ]
         videos = [self._video_preprocess(video, oh, ow) for video in videos]
         return *videos, frame_ids, (oh, ow), fps
         # return videos if len(videos) > 1 else videos[0]

@@ -3,3 +3,12 @@ pretrained_models
 __pycache__
 .cache
 outputs
+studio_data
+
+# Frontend build deps/artifacts
+node_modules
+*.tsbuildinfo
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json

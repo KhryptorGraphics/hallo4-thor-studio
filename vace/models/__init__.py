@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import os
+
 from . import utils
 
 try:
     from . import ltx
 except ImportError as e:
-    print("Error importing 'ltx'. Please install its dependencies with:")
-    print("pip install ltx-video@git+https://github.com/Lightricks/LTX-Video@ltx-video-0.9.1 sentencepiece --no-deps")
+    if os.getenv("HALLO4_SHOW_OPTIONAL_IMPORT_WARNINGS") == "1":
+        print("Error importing 'ltx'. Please install its dependencies with:")
+        print("pip install ltx-video@git+https://github.com/Lightricks/LTX-Video@ltx-video-0.9.1 sentencepiece --no-deps")
 
 try:
     from . import wan

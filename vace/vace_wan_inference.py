@@ -316,6 +316,13 @@ def get_parser():
         help="The features type of wav2vec model."
     )
     parser.add_argument(
+        "--save_chunks",
+        action="store_true",
+        default=False,
+        help="Save each generated round as a standalone {case}_chunk_{i}.mp4 (with sliced audio) "
+             "for progressive/near-real-time playback. Off by default; the offline batch path is unchanged.",
+    )
+    parser.add_argument(
         "--rank_idx",
         type=int,
         default=0,
@@ -354,6 +361,53 @@ def process_audio_emb(audio_emb):
     audio_emb = torch.stack(concatenated_tensors, dim=0)
 
     return audio_emb
+
+
+def add_audio_segment(video_path, audio_path, start_sec, dur):
+    """Mux a [start_sec, start_sec+dur] slice of audio_path onto video_path, in place.
+
+    Used for per-chunk streaming so each chunk carries the matching audio segment.
+    Mirrors utils.add_audio but slices the source audio instead of using all of it.
+    """
+    import moviepy.editor as mp
+
+    video_clip = mp.VideoFileClip(video_path)
+    audio_clip = mp.AudioFileClip(audio_path)
+    try:
+        if start_sec >= audio_clip.duration:
+            return
+        end = min(start_sec + dur, audio_clip.duration)
+        segment = audio_clip.subclip(start_sec, end)
+        if segment.duration > video_clip.duration:
+            segment = segment.subclip(0, video_clip.duration)
+        out = video_clip.set_audio(segment)
+        tmp_path = f"{video_path}.aud.mp4"
+        out.write_videofile(
+            tmp_path, fps=video_clip.fps, audio_codec="aac", codec="libx264", verbose=False
+        )
+        os.remove(video_path)
+        os.rename(tmp_path, video_path)
+    finally:
+        video_clip.close()
+        audio_clip.close()
+
+
+def save_chunk_clip(chunk, save_file, fps, audio_path, start_sec, dur):
+    """Save one generated round as a standalone mp4 (with sliced audio) and log a stream token."""
+    cache_video(
+        tensor=chunk[None],
+        save_file=save_file,
+        fps=fps,
+        nrow=1,
+        normalize=True,
+        value_range=(-1, 1),
+    )
+    if audio_path is not None:
+        try:
+            add_audio_segment(save_file, audio_path, start_sec, dur)
+        except Exception as exc:  # noqa: BLE001
+            logging.warning(f"Chunk audio mux failed ({exc}); leaving chunk silent.")
+    logging.info(f"CHUNK_SAVED {os.path.basename(save_file)}")
 
 def main(args):
     args = argparse.Namespace(**args) if isinstance(args, dict) else args
@@ -427,23 +481,14 @@ def main(args):
     for prompt, skeleton_video, src_mask, src_ref_image, audio_path in zip(
         prompts, src_videos, src_masks, src_ref_images, audios
     ):
+        source_video_path = skeleton_video
         case_name = os.path.basename(skeleton_video)[:-4]
         if os.path.exists(os.path.join(save_dir, f"{case_name}_out_video.mp4")):
             continue
         logging.info(f"Processing {case_name}.")
         logging.info("Preparing Condition.")
-        whole_skeleton_video, whole_src_mask, whole_src_ref_image,ref_image_sizes = wan_vace.prepare_source(
-            [skeleton_video],
-            [src_mask],
-            [None if src_ref_image is None else src_ref_image.split(",")],
-            args.frame_num,
-            SIZE_CONFIGS[args.size],
-            device,
-        )
+        src_ref_image_inputs = [None if src_ref_image is None else src_ref_image.split(",")]
 
-        whole_skeleton_video = [whole_skeleton_video[0][:,args.start_inf_frame:]]
-        whole_src_mask = [whole_src_mask[0][:,args.start_inf_frame:]]
-        
         if audio_path is not None:
             audio_separator_model_file = args.audio_separator_model_path
             wav2vec_model_path = args.wav2vec_model_path
@@ -459,39 +504,64 @@ def main(args):
             audio_emb, length = audio_processor.preprocess(audio_path)
             whole_audio_emb = process_audio_emb(audio_emb).to(device=wan_vace.model.device, dtype=wan_vace.model.dtype)
             whole_audio_emb = whole_audio_emb[args.start_inf_frame:]
+        else:
+            raise ValueError("src_audio is required for Hallo4 inference.")
+
+        if whole_audio_emb.shape[0] <= 0:
+            raise RuntimeError("No audio frames are available after start_inf_frame.")
 
         video = []
-        motion_frames = whole_src_ref_image[0][0].repeat(1, args.n_motion_frame, 1, 1)
-        times = math.ceil((min(whole_skeleton_video[0].shape[1],whole_audio_emb.shape[0])-1) / (args.frame_num-1))
+        debug_skeleton_chunks = []
+        debug_mask_chunks = []
+        motion_frames = None
+        whole_src_ref_image = None
+        ref_image_sizes = []
+        frames_written = 0
+        chunk_fps = cfg.sample_fps
+
+        times = math.ceil((whole_audio_emb.shape[0] - 1) / (args.frame_num - 1))
+        times = max(times, 1)
         if args.max_round:
             times = min(times, args.max_round)
         for i in range(times):
             logging.info(f"{i+1}/{times}")
             pad_len=0
             pad_audio_len=0
+            round_start = i * (args.frame_num - 1)
 
-            if i == 0:
-                skeleton_video = [whole_skeleton_video[0][
-                    :, i * args.frame_num : (i + 1) * args.frame_num
-                ]]
-                clip_src_mask = [
-                    whole_src_mask[0][:, i * args.frame_num : (i + 1) * args.frame_num]
-                ]
-                audio_tensor = whole_audio_emb[
-                i * args.frame_num : (i + 1) * args.frame_num
-                ]
-            else:
-                skeleton_video = [whole_skeleton_video[0][
-                    :, i * (args.frame_num-1) : (i + 1) * (args.frame_num-1)+1
-                ]]
-                clip_src_mask = [
-                    whole_src_mask[0][:, i * (args.frame_num-1) : (i + 1) * (args.frame_num-1)+1]
-                ]
-                audio_tensor = whole_audio_emb[
-                i * (args.frame_num-1) : (i + 1) * (args.frame_num-1)+1
-                ]
+            try:
+                skeleton_video, clip_src_mask, prepared_ref_images, chunk_ref_image_sizes = wan_vace.prepare_source(
+                    [source_video_path],
+                    [src_mask],
+                    src_ref_image_inputs if whole_src_ref_image is None else [None],
+                    args.frame_num,
+                    SIZE_CONFIGS[args.size],
+                    device,
+                    start_frame=args.start_inf_frame + round_start,
+                    frame_count=args.frame_num,
+                )
+            except RuntimeError as exc:
+                if i > 0 and "No frames decoded" in str(exc):
+                    logging.info(f"Source video ended before round {i+1}; finishing generated chunks.")
+                    break
+                raise
+
+            if i > 0 and skeleton_video[0].shape[1] <= 1:
+                logging.info(f"Source video ended before round {i+1}; finishing generated chunks.")
+                break
+
+            if whole_src_ref_image is None:
+                whole_src_ref_image = prepared_ref_images
+                ref_image_sizes = chunk_ref_image_sizes
+
+            audio_tensor = whole_audio_emb[round_start : round_start + args.frame_num]
+            if audio_tensor.shape[0] == 0:
+                logging.info(f"Audio ended before round {i+1}; finishing generated chunks.")
+                break
 
             skeleton_video[0] = wan_vace._resize_for_rectangle_crop(skeleton_video[0],SIZE_CONFIGS[args.size],reshape_mode="center")
+            debug_skeleton_chunks.append(skeleton_video[0] if i == 0 else skeleton_video[0][:, 1:])
+            debug_mask_chunks.append(clip_src_mask[0] if i == 0 else clip_src_mask[0][:, 1:])
 
             if skeleton_video[0].shape[1] < args.frame_num:
                 pad_len = args.frame_num - skeleton_video[0].shape[1]
@@ -542,7 +612,21 @@ def main(args):
             if pad_len>0 or pad_audio_len>0:
                 video[-1]=video[-1][:, :-max(pad_len,pad_audio_len)]
             motion_frames = video[-1][:, -args.n_motion_frame:, :, :]
+
+            if args.save_chunks and rank == 0:
+                chunk = center_crop_width(video[-1], ref_image_sizes[0], SIZE_CONFIGS[args.size][0])
+                n_i = chunk.shape[1]
+                chunk_file = os.path.join(save_dir, f"{case_name}_chunk_{i:03d}.mp4")
+                save_chunk_clip(
+                    chunk, chunk_file, chunk_fps, audio_path,
+                    start_sec=frames_written / chunk_fps, dur=n_i / chunk_fps,
+                )
+                frames_written += n_i
+        if not video:
+            raise RuntimeError("No video frames were generated; source video or audio ended before the requested start frame.")
         video = torch.concat(video, dim=1)
+        used_skeleton_video = torch.cat(debug_skeleton_chunks, dim=1)
+        used_src_mask = torch.cat(debug_mask_chunks, dim=1)
         video = center_crop_width(video, ref_image_sizes[0], SIZE_CONFIGS[args.size][0])
 
         # save debug visulinfo first
@@ -550,7 +634,7 @@ def main(args):
         if rank == 0:
             save_file = os.path.join(save_dir, f"{case_name}_src_video.mp4")
             cache_video(
-                tensor=whole_skeleton_video[0][None],
+                tensor=used_skeleton_video[None],
                 save_file=save_file,
                 fps=cfg.sample_fps,
                 nrow=1,
@@ -562,7 +646,7 @@ def main(args):
 
             save_file = os.path.join(save_dir, f"{case_name}_src_mask.mp4")
             cache_video(
-                tensor=whole_src_mask[0][None],
+                tensor=used_src_mask[None],
                 save_file=save_file,
                 fps=cfg.sample_fps,
                 nrow=1,
@@ -601,7 +685,7 @@ def main(args):
             if audio_path is not None:
                 add_audio(save_file, audio_path)
         
-        del whole_skeleton_video, video
+        del used_skeleton_video, used_src_mask, video
         torch.cuda.empty_cache()
 
     logging.info("Finished.")
