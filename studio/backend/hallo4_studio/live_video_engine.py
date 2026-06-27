@@ -384,8 +384,11 @@ class LiveVideoEngine:
                 del model
                 if last_err is not None:
                     raise last_err
+            # fp16 TRT overflows these nets to NaN on Thor (black faces); fp32 is the safe
+            # default. HALLO4_TRT_FP16=1 forces fp16 (warmup validation still guards output).
+            fp16 = os.environ.get("HALLO4_TRT_FP16", "0") == "1"
             providers = [("TensorrtExecutionProvider",
-                          {"trt_fp16_enable": True, "trt_engine_cache_enable": True,
+                          {"trt_fp16_enable": fp16, "trt_engine_cache_enable": True,
                            "trt_engine_cache_path": cache_dir}),
                          "CUDAExecutionProvider"]
             sess = ort.InferenceSession(onnx_path, providers=providers)
@@ -414,8 +417,12 @@ class LiveVideoEngine:
                 torch.onnx.export(g32, x, onnx_path, input_names=["x"], output_names=["y"],
                                   opset_version=17, dynamo=False)  # dynamo needs onnxscript
                 del g32
+            # fp16 TRT overflows this SPADE generator to NaN -> black faces on Thor;
+            # default to fp32 TRT (numerically safe) unless HALLO4_TRT_FP16=1 is set
+            # (and even then, warmup validation falls back to eager if degenerate).
+            fp16 = os.environ.get("HALLO4_TRT_FP16", "0") == "1"
             providers = [("TensorrtExecutionProvider",
-                          {"trt_fp16_enable": True, "trt_engine_cache_enable": True,
+                          {"trt_fp16_enable": fp16, "trt_engine_cache_enable": True,
                            "trt_engine_cache_path": cache_dir}),
                          "CUDAExecutionProvider"]
             sess = ort.InferenceSession(onnx_path, providers=providers)
@@ -509,6 +516,41 @@ class LiveVideoEngine:
         if W.flag_use_occlusion_map and (occlusion_map is not None):
             out = out * occlusion_map
         return out
+
+    def _render_source_face(self):
+        """Render the source on itself (identity motion) -> 512² RGB uint8, the same
+        path drive() uses. Used to validate the whole TRT pipeline at warmup."""
+        torch = self._torch
+        with torch.no_grad():
+            return self._spade(self._warp(self._kp_source))
+
+    @staticmethod
+    def _face_degenerate(img) -> bool:
+        return (img is None) or (not np.isfinite(img).all()) or float(np.nan_to_num(img).mean()) < 8.0
+
+    def _validate_pipeline(self, rgb256) -> None:
+        """Holistic guard: fp16 TRT (motion AND spade) can overflow to NaN -> a black
+        face. Render the source; if degenerate, disable ALL TRT sessions and recompute
+        the source keypoints eagerly so output is always correct (eager fallback)."""
+        if not (self._spade_sess or self._motion_sess or self._dm_sess):
+            return
+        try:
+            img = self._render_source_face()
+            if not self._face_degenerate(img):
+                self.trt_active = self._spade_sess is not None
+                return
+            log.warning("TRT pipeline rendered a degenerate face (mean=%.1f) -> disabling all "
+                        "TRT, recomputing eagerly.", float(np.nan_to_num(img).mean() if img is not None else 0))
+            self._spade_sess = self._motion_sess = self._dm_sess = None
+            self.trt_active = False
+            with self._torch.no_grad():
+                self._kp_source = self._kp_from_crop(rgb256)       # eager now (motion_sess=None)
+            img = self._render_source_face()
+            log.info("eager fallback face mean=%.1f", float(np.nan_to_num(img).mean()))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Pipeline validation error (%s) -> disabling TRT.", exc)
+            self._spade_sess = self._motion_sess = self._dm_sess = None
+            self.trt_active = False
 
     def _spade(self, warp_out):
         """warp_out: (1,256,64,64) torch fp16 -> 512² RGB uint8 (HxWx3)."""
@@ -692,6 +734,7 @@ class LiveVideoEngine:
             src = self._prep(rgb256)
             self._feature_3d = self._F(src)                      # (1,32,16,64,64) fp16
             self._kp_source = self._kp_from_crop(rgb256)         # (1,21,3) fp32
+        self._validate_pipeline(rgb256)                          # guard against black-face TRT
         self._kp_driving_initial = None
         self._frame_idx = 0
         self._cached_box = None

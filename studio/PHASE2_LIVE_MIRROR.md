@@ -9,11 +9,14 @@
 > Mounted in `app.py`; real engines gated by `HALLO4_LIVE_ENGINE=1`.
 >
 > **Gaps closed (round 2):**
-> - **fps:** SPADE + motion-extractor on ORT-TensorRT + detection-skip → **~22.6 fps
->   @256² video-only** (from ~9). Honest miss on 25: the warp's `dense_motion` is a
->   ~22 ms eager wall — its **5D volumetric grid_sample** can't run on TRT (rejects
->   `nbDims!=4`); crossing 25 needs a native 5D-GridSample TRT/CUDA plugin
->   (FasterLivePortrait-style, out of scope) or deformation-caching (judder).
+> - **fps — corrected after the live e2e found a bug:** the "22.6 fps via TRT" was on
+>   **broken output** — fp16 ORT-TRT overflows the motion+SPADE nets to NaN → a **black
+>   face**. Fixed: TRT defaults to fp32 + a warmup render-check disables TRT and recomputes
+>   eager if the face is degenerate. Reality on Thor: **eager is correct AND fastest**
+>   (~15 fps video-only / ~12 fps with Wav2Lip-every-frame); fp16-TRT is a black face,
+>   fp32-TRT is correct but ~2× *slower* than eager. So **don't set `HALLO4_LIVE_TRT`** —
+>   TRT gives no usable speedup for these LivePortrait nets here. The warp's 5D
+>   grid_sample remains the eager floor; 25+ fps needs a native plugin (out of scope).
 > - **Wav2Lip:** real (vendored model + `wav2lip_gan.pth`, librosa mel, audio ring
 >   buffer) — mouth tracks speech; ~18.9 fps with it on every frame.
 > - **Voice:** real **streaming kNN-VC** (not seed-vc — its `torch==2.4.0` pin would
