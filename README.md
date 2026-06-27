@@ -56,7 +56,17 @@ HALLO4_LIVE_ENGINE=1 \
 ```
 
 Open `https://<thor-lan-ip>:8443/`, accept the self-signed cert, and use the
-**Live Studio** tab. Full setup, flags, and the live-mirror architecture:
+**Live Studio** tab.
+
+**Deploy as a persistent service** (systemd `--user`, HTTPS, auto-generated auth
+token, survives reboot — no sudo):
+
+```bash
+bash scripts/deploy_studio.sh
+# manage: systemctl --user {status,restart,stop} hallo4-studio
+```
+
+Full setup, flags, and the live-mirror architecture:
 - [`studio/README.md`](studio/README.md) — setup, HTTPS, capture flows, the
   resident-model option (`HALLO4_INPROCESS_ENGINE=1`).
 - [`studio/PHASE2_LIVE_MIRROR.md`](studio/PHASE2_LIVE_MIRROR.md) — the live-mirror
