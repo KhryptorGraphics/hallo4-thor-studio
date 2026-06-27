@@ -38,14 +38,19 @@ if [ ! -f "$CERT_DIR/studio.key" ]; then
   bash scripts/make_studio_cert.sh
 fi
 
-# 3. Auth token — required: this animates likenesses/voices; never expose it open.
+# 3. Auth — OFF by default (this is meant for a trusted private LAN). Opt in with
+#    HALLO4_STUDIO_AUTH=1 to require a bearer token (e.g. if you expose it wider).
 mkdir -p "$DATA"
-if [ ! -f "$ENV_FILE" ]; then
-  echo "==> generating auth token -> $ENV_FILE"
-  umask 077
-  echo "HALLO4_STUDIO_TOKEN=$(openssl rand -hex 24)" > "$ENV_FILE"
+if [ "${HALLO4_STUDIO_AUTH:-0}" = "1" ]; then
+  if ! grep -q '^HALLO4_STUDIO_TOKEN=' "$ENV_FILE" 2>/dev/null; then
+    echo "==> auth ON — generating token -> $ENV_FILE"
+    umask 077
+    echo "HALLO4_STUDIO_TOKEN=$(openssl rand -hex 24)" > "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+else
+  : > "$ENV_FILE"   # empty -> no token -> open access on the trusted LAN
 fi
-chmod 600 "$ENV_FILE"
 
 # 4. systemd --user unit. conda run gives the full CUDA env (LD_LIBRARY_PATH etc.).
 mkdir -p "$UNIT_DIR"
@@ -61,7 +66,7 @@ WorkingDirectory=$REPO
 Environment=HALLO4_LIVE_ENGINE=1
 Environment=HALLO4_ATTENTION_BACKEND=sdpa
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=$ENV_FILE
+EnvironmentFile=-$ENV_FILE
 ExecStart=$CONDA run --no-capture-output -n $ENV_NAME uvicorn studio.backend.hallo4_studio.app:app \\
   --host 0.0.0.0 --port $PORT \\
   --ssl-keyfile $CERT_DIR/studio.key --ssl-certfile $CERT_DIR/studio.crt
@@ -79,10 +84,13 @@ systemctl --user restart "$UNIT"   # pick up code/cert changes on re-deploy
 sleep 4
 
 LAN="$(hostname -I | awk '{print $1}')"
-TOKEN="$(. "$ENV_FILE"; echo "$HALLO4_STUDIO_TOKEN")"
+TOKEN="$(. "$ENV_FILE" 2>/dev/null; echo "${HALLO4_STUDIO_TOKEN:-}")"
 echo
 systemctl --user --no-pager status "$UNIT" | head -6 || true
 echo
-echo "==> Studio:  https://$LAN:$PORT/"
-echo "==> Token:   $TOKEN   (enter under Preflight > Access in the UI)"
+if [ -n "$TOKEN" ]; then
+  echo "==> Studio:  https://$LAN:$PORT/?token=$TOKEN   (auth ON)"
+else
+  echo "==> Studio:  https://$LAN:$PORT/   (no auth — trusted LAN)"
+fi
 echo "==> Logs:    journalctl --user -u $UNIT -f"

@@ -58,11 +58,13 @@ HALLO4_LIVE_ENGINE=1 \
 Open `https://<thor-lan-ip>:8443/`, accept the self-signed cert, and use the
 **Live Studio** tab.
 
-**Deploy as a persistent service** (systemd `--user`, HTTPS, auto-generated auth
-token, survives reboot — no sudo):
+**Deploy as a persistent service** (systemd `--user`, HTTPS, survives reboot — no
+sudo). Auth is **off by default** (meant for a trusted private LAN); set
+`HALLO4_STUDIO_AUTH=1` to require a bearer token if you expose it wider:
 
 ```bash
-bash scripts/deploy_studio.sh
+bash scripts/deploy_studio.sh                 # open on the LAN (no auth)
+HALLO4_STUDIO_AUTH=1 bash scripts/deploy_studio.sh   # require a token
 # manage: systemctl --user {status,restart,stop} hallo4-studio
 ```
 
