@@ -20,7 +20,17 @@
 >   the motion extractor + dense-motion convs adds headroom for Wav2Lip. Caveat: the
 >   warping module's **5D (volumetric) grid_sample doesn't ONNX-export** — use the
 >   FasterLivePortrait split (TRT the conv parts, keep the 5D warp in torch).
-> - **Still open in 2a:** RVC real-time latency.
+> - **RVC voice ✅** — the dominant component (94M HuBERT/ContentVec-class content
+>   encoder, proxied by the repo's wav2vec2-base) runs **~5 ms/chunk** on Thor
+>   regardless of chunk size (1–3% of the realtime budget); + RMVPE pitch + a
+>   VITS synthesizer (~the HiFiGAN scale already run realtime in the kNN-VC test)
+>   ⇒ ~15–30 ms/chunk compute, far under a 160–500 ms chunk. Compute is a non-issue;
+>   the real cost is the **install** (fairseq/HuBERT on aarch64) + per-voice training.
+>
+> **2a VERDICT: GO.** All four legs feasible on Thor (transport, insightface,
+> LivePortrait via TensorRT, RVC). Remaining Phase-2 work is engineering, not
+> feasibility: the TensorRT LivePortrait build (incl. the 5D-grid_sample split),
+> RVC install + enrollment workflow, aiortc session plumbing, and the frontend.
 
 ## Goal / definition of done
 
