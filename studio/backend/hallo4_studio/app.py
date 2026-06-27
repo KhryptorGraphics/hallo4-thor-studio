@@ -433,7 +433,13 @@ def build_command(job_id: str, payload: JobRequest, paths: dict[str, Any]) -> li
         payload.wav2vec_features,
     ]
     append_arg(command, "--sample_steps", payload.sample_steps)
-    append_arg(command, "--max_round", payload.max_round)
+    # Cap take length: an unbounded (max_round=None) long take generates a chunk per
+    # ~3s of audio, accumulating memory. Default cap ~20 rounds (~64s); HALLO4_MAX_ROUND=0 = unlimited.
+    max_round = payload.max_round
+    round_cap = int(os.getenv("HALLO4_MAX_ROUND", "20"))
+    if round_cap > 0 and (max_round is None or max_round > round_cap):
+        max_round = round_cap
+    append_arg(command, "--max_round", max_round)
     append_arg(command, "--sample_shift", payload.sample_shift)
 
     if payload.offload_model:
@@ -920,6 +926,16 @@ async def capture_stop() -> UploadInfo:
 
 @app.post("/api/jobs", response_model=JobInfo, dependencies=[Depends(require_auth)])
 async def create_job(payload: JobRequest) -> JobInfo:
+    # Cap pending jobs: each render loads ~16GB of models, so stacking several
+    # (e.g. impatient re-submits) exhausts memory. Serialised by gpu_lock anyway.
+    max_pending = int(os.getenv("HALLO4_MAX_PENDING_JOBS", "1"))
+    pending = [j for j in state.jobs.values() if j.info.status in ("queued", "running")]
+    if len(pending) >= max_pending:
+        raise HTTPException(
+            status_code=429,
+            detail=f"{len(pending)} render job(s) already queued/running — wait for them to "
+                   f"finish or cancel one before submitting another.",
+        )
     paths = validate_job_request(payload)
     job_id = uuid.uuid4().hex[:12]
     command = build_command(job_id, payload, paths)

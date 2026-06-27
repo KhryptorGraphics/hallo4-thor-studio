@@ -410,6 +410,25 @@ def save_chunk_clip(chunk, save_file, fps, audio_path, start_sec, dur):
     logging.info(f"CHUNK_SAVED {os.path.basename(save_file)}")
 
 
+def concat_chunks(chunk_files, out_file):
+    """Concatenate per-chunk mp4s into the final video with ffmpeg (stream copy, no
+    re-encode). Lets a streaming render free each chunk from RAM after writing it,
+    instead of accumulating the whole take in memory."""
+    import subprocess
+
+    list_path = out_file + ".concat.txt"
+    with open(list_path, "w") as fh:
+        for c in chunk_files:
+            fh.write(f"file '{os.path.abspath(c)}'\n")
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+         "-i", list_path, "-c", "copy", out_file],
+        check=True,
+    )
+    os.remove(list_path)
+    return out_file
+
+
 _PIPELINE_CACHE = {}
 
 
@@ -539,6 +558,7 @@ def main(args):
             raise RuntimeError("No audio frames are available after start_inf_frame.")
 
         video = []
+        chunk_files = []
         debug_skeleton_chunks = []
         debug_mask_chunks = []
         motion_frames = None
@@ -588,8 +608,9 @@ def main(args):
                 break
 
             skeleton_video[0] = wan_vace._resize_for_rectangle_crop(skeleton_video[0],SIZE_CONFIGS[args.size],reshape_mode="center")
-            debug_skeleton_chunks.append(skeleton_video[0] if i == 0 else skeleton_video[0][:, 1:])
-            debug_mask_chunks.append(clip_src_mask[0] if i == 0 else clip_src_mask[0][:, 1:])
+            if not args.save_chunks:  # skip debug-artifact accumulation in streaming mode (bounds RAM)
+                debug_skeleton_chunks.append(skeleton_video[0] if i == 0 else skeleton_video[0][:, 1:])
+                debug_mask_chunks.append(clip_src_mask[0] if i == 0 else clip_src_mask[0][:, 1:])
 
             if skeleton_video[0].shape[1] < args.frame_num:
                 pad_len = args.frame_num - skeleton_video[0].shape[1]
@@ -639,7 +660,9 @@ def main(args):
                 video.append(clip_video[:, 1:,])
             if pad_len>0 or pad_audio_len>0:
                 video[-1]=video[-1][:, :-max(pad_len,pad_audio_len)]
-            motion_frames = video[-1][:, -args.n_motion_frame:, :, :]
+            # clone so the accumulated `video` can be freed below without losing the
+            # autoregression carry-over frames
+            motion_frames = video[-1][:, -args.n_motion_frame:, :, :].clone()
 
             if args.save_chunks and rank == 0:
                 chunk = center_crop_width(video[-1], ref_image_sizes[0], SIZE_CONFIGS[args.size][0])
@@ -650,6 +673,21 @@ def main(args):
                     start_sec=frames_written / chunk_fps, dur=n_i / chunk_fps,
                 )
                 frames_written += n_i
+                chunk_files.append(chunk_file)
+                video = []                 # bound RAM: chunk is on disk, motion_frames cloned
+                del chunk
+        if args.save_chunks and rank == 0:
+            # Streaming render: final video = per-chunk files concatenated on disk, so
+            # RAM never holds the whole take. (Debug src_video/src_mask skipped.)
+            if not chunk_files:
+                raise RuntimeError("No chunks were generated; source video or audio ended before the requested start frame.")
+            save_file = os.path.join(save_dir, f"{case_name}_out_video.mp4")
+            concat_chunks(chunk_files, save_file)
+            logging.info(f"Saving generated video from {len(chunk_files)} chunks to {save_file}")
+            ret_data = {"out_video": save_file}
+            torch.cuda.empty_cache()
+            continue
+
         if not video:
             raise RuntimeError("No video frames were generated; source video or audio ended before the requested start frame.")
         video = torch.concat(video, dim=1)
