@@ -3,13 +3,21 @@
 > Status: **scoping**. Not built. Phase 1 (record → generate → play on hallo4 with
 > voice cloning) is done on branch `feat/webcam-avatar-studio`.
 >
-> **2a progress (transport leg ✅):** `aiortc 1.14 + av 16.1` install cleanly on
-> Thor — av ships a prebuilt aarch64 wheel with **bundled ffmpeg**, so the
-> ffmpeg-8 risk (#2) is moot; numpy 1.26.4 and onnxruntime CUDA/TensorRT
-> providers untouched; studio x86_64-wheel gate stays green. A full in-process
-> WebRTC loopback (DTLS/SRTP + VP8 encode→decode) sustains 30 fps at 320².
-> Self-test: `scripts/phase2_aiortc_loopback.py`. **Still open in 2a:**
-> LivePortrait+insightface install & fps, and RVC.
+> **2a progress:**
+> - **Transport ✅** — `aiortc 1.14 + av 16.1` install cleanly (av bundles ffmpeg →
+>   ffmpeg-8 risk #2 moot); numpy/onnxruntime untouched; full WebRTC loopback
+>   (DTLS/SRTP + VP8) sustains 30 fps at 320². Self-test:
+>   `scripts/phase2_aiortc_loopback.py`.
+> - **insightface / onnxruntime clobber ✅** — `pip install insightface --no-deps`
+>   avoids the CPU-onnxruntime pull; GPU providers + numpy pin + x86_64 gate all
+>   survive; detector runs on the GPU build (buffalo_l, ~26 ms on the ref image).
+> - **LivePortrait fps ⚠️ needs TensorRT** — PyTorch ≈ **16–17 fps** (62 ms/frame:
+>   SPADE 31 ms + warp 22 ms; appearance 5 ms is once-per-session). **`torch.compile`
+>   gives no speedup on Thor** — triton ptxas rejects `sm_110a` and falls back to
+>   eager (compiled 17 fps ≈ eager 16 fps). So real-time needs a **TensorRT** engine
+>   (Blackwell-capable; cf. FasterLivePortrait), not torch.compile. See
+>   [[torch-compile-fails-thor-sm110]].
+> - **Still open in 2a:** a TensorRT LivePortrait(+Wav2Lip) fps number, and RVC.
 
 ## Goal / definition of done
 
@@ -103,15 +111,20 @@ LivePortrait + Wav2Lip per-frame loop, and real-time RVC inference.
 
 ## Risks
 
-1. **onnxruntime clobber (insightface)** — HIGH. Mitigate: `pip install insightface
-   --no-deps` + keep onnxruntime-gpu pinned, or replace the detector. Gate on Preflight
-   showing GPU providers + no x86_64 wheels. See [[torchaudio-no-torchcodec-thor]] for the
+1. **onnxruntime clobber (insightface)** — ✅ RESOLVED. `pip install insightface
+   --no-deps` skips the CPU-onnxruntime pull and reuses the GPU build; verified
+   providers/numpy/x86_64-gate intact and the detector runs on GPU (~26 ms). The
+   live engine must pin this install method. See [[torchaudio-no-torchcodec-thor]] for the
    same class of env trap.
 2. **PyAV/aiortc vs ffmpeg 8** — ✅ RESOLVED. The `av` aarch64 wheel bundles its own
    ffmpeg, so it ignores the linuxbrew ffmpeg 8 entirely; loopback verified at 30 fps.
-3. **Combined two-model fps on Thor** (LivePortrait + Wav2Lip per frame) — MED/HIGH.
-   Blackwell + TensorRT EP should suffice but is unproven; 2a measures the *combined*
-   path, not each model alone.
+3. **Combined two-model fps on Thor** (LivePortrait + Wav2Lip per frame) — MED/HIGH,
+   now **TensorRT-gated**. Measured: LivePortrait PyTorch ≈ 16–17 fps, and
+   `torch.compile` does **not** help on Thor (triton can't target SM110 — see
+   [[torch-compile-fails-thor-sm110]]). Real-time therefore requires a **TensorRT**
+   build of LivePortrait (and Wav2Lip). TensorRT supports Blackwell, so the path
+   exists, but it's real work (ONNX export → engine) and is the main remaining 2a
+   unknown. Without it, expect ~15 fps (usable as a preview, not smooth video-call).
 4. **RVC enrollment cost** — MED. Needs more clean target audio (ideally minutes) and a
    GPU training run per target; this is an offline step before any live session, not an
    upload. Quality depends on enrollment data.
