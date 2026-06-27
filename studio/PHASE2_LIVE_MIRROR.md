@@ -11,13 +11,16 @@
 > - **insightface / onnxruntime clobber ✅** — `pip install insightface --no-deps`
 >   avoids the CPU-onnxruntime pull; GPU providers + numpy pin + x86_64 gate all
 >   survive; detector runs on the GPU build (buffalo_l, ~26 ms on the ref image).
-> - **LivePortrait fps ⚠️ needs TensorRT** — PyTorch ≈ **16–17 fps** (62 ms/frame:
->   SPADE 31 ms + warp 22 ms; appearance 5 ms is once-per-session). **`torch.compile`
->   gives no speedup on Thor** — triton ptxas rejects `sm_110a` and falls back to
->   eager (compiled 17 fps ≈ eager 16 fps). So real-time needs a **TensorRT** engine
->   (Blackwell-capable; cf. FasterLivePortrait), not torch.compile. See
->   [[torch-compile-fails-thor-sm110]].
-> - **Still open in 2a:** a TensorRT LivePortrait(+Wav2Lip) fps number, and RVC.
+> - **LivePortrait fps ✅ GO via TensorRT** — PyTorch ≈ 16–17 fps and `torch.compile`
+>   is a no-op on Thor (triton can't target SM110, see [[torch-compile-fails-thor-sm110]]).
+>   But **TensorRT works**: via the onnxruntime **TRT execution provider** (no separate
+>   `tensorrt` install needed) the SPADE decoder — the dominant 31 ms — drops to
+>   **10.3 ms fp16 (3×)** and builds a **native `_sm110.engine`**. That alone takes the
+>   per-frame budget to **~38 ms → ~26 fps** with everything else still eager; TRT-ing
+>   the motion extractor + dense-motion convs adds headroom for Wav2Lip. Caveat: the
+>   warping module's **5D (volumetric) grid_sample doesn't ONNX-export** — use the
+>   FasterLivePortrait split (TRT the conv parts, keep the 5D warp in torch).
+> - **Still open in 2a:** RVC real-time latency.
 
 ## Goal / definition of done
 
@@ -118,13 +121,13 @@ LivePortrait + Wav2Lip per-frame loop, and real-time RVC inference.
    same class of env trap.
 2. **PyAV/aiortc vs ffmpeg 8** — ✅ RESOLVED. The `av` aarch64 wheel bundles its own
    ffmpeg, so it ignores the linuxbrew ffmpeg 8 entirely; loopback verified at 30 fps.
-3. **Combined two-model fps on Thor** (LivePortrait + Wav2Lip per frame) — MED/HIGH,
-   now **TensorRT-gated**. Measured: LivePortrait PyTorch ≈ 16–17 fps, and
-   `torch.compile` does **not** help on Thor (triton can't target SM110 — see
-   [[torch-compile-fails-thor-sm110]]). Real-time therefore requires a **TensorRT**
-   build of LivePortrait (and Wav2Lip). TensorRT supports Blackwell, so the path
-   exists, but it's real work (ONNX export → engine) and is the main remaining 2a
-   unknown. Without it, expect ~15 fps (usable as a preview, not smooth video-call).
+3. **Combined two-model fps on Thor** (LivePortrait + Wav2Lip per frame) — ✅ feasible
+   (was MED/HIGH). Proven: TensorRT (via the onnxruntime TRT EP) takes SPADE 31 → 10.3 ms
+   and builds native SM110 engines, putting the pipeline at ~26 fps with only SPADE
+   converted; more modules on TRT add Wav2Lip headroom. `torch.compile` is a no-op here
+   ([[torch-compile-fails-thor-sm110]]). Remaining work is *engineering, not feasibility*:
+   a full TRT build (warping's 5D grid_sample needs the FasterLivePortrait split — TRT
+   the conv parts, keep the volumetric warp in torch).
 4. **RVC enrollment cost** — MED. Needs more clean target audio (ideally minutes) and a
    GPU training run per target; this is an offline step before any live session, not an
    upload. Quality depends on enrollment data.
