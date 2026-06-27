@@ -150,6 +150,44 @@ class VoiceConverter:
         logger.info("Voice-converted %s -> %s (%.2fs)", src_wav, out_wav, out.numel() / SAMPLE_RATE)
         return out_wav
 
+    # -- streaming (Phase 2 live mirror) ------------------------------------ #
+    def precompute_target(self, ref_wav):
+        """Load the model and return the target's kNN matching-set features ONCE.
+
+        ``ref_wav`` is a path (or list of paths) to the enrolled speaker's
+        reference clip(s). Pass the returned tensor to :meth:`convert_stream` for
+        every streamed window — this is the per-target precompute, so the
+        per-chunk cost is just one WavLM forward + the kNN match. Returned on the
+        model's device so ``match`` doesn't re-upload it each call.
+        """
+        self.load()
+        import torch
+
+        refs = list(ref_wav) if isinstance(ref_wav, (list, tuple)) else [ref_wav]
+        with torch.no_grad():
+            matching_set = self._model.get_matching_set(refs)
+        return matching_set.to(self.device)
+
+    def convert_stream(self, pcm_f32_16k, matching_set):
+        """Convert one mono float32 window (16 kHz, ~[-1, 1]) to the target timbre.
+
+        ``matching_set`` is the tensor from :meth:`precompute_target`. The window
+        is fed to WavLM as a *tensor* — kNN-VC's ``get_features`` accepts a
+        waveform tensor (matcher.py), so streaming needs no temp wav per chunk.
+        ``tgt_loudness_db=None`` disables kNN-VC's per-utterance loudness norm: on
+        short / near-silent streaming windows it divides by ~0 and explodes; the
+        caller levels the output instead. Returns a 1-D float32 numpy array.
+        """
+        import numpy as np
+        import torch
+
+        self.load()
+        x = torch.as_tensor(np.asarray(pcm_f32_16k, dtype=np.float32))
+        with torch.no_grad():
+            query = self._model.get_features(x)
+            out = self._model.match(query, matching_set, topk=self.topk, tgt_loudness_db=None)
+        return out.detach().cpu().numpy().astype(np.float32).reshape(-1)
+
 
 def demo() -> None:
     """Self-check.

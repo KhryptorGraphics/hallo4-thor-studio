@@ -4,13 +4,23 @@
 > `feat/webcam-avatar-studio`. Phase 1 (record → generate → play) also done.
 >
 > **Built (functional):** WebRTC live session (`live_session.py`, 30 fps relay),
-> real LivePortrait reenactment engine (`live_video_engine.py` — real weights,
-> eager ~6 fps@768² / ~9 fps@256²+TRT), RVC engine + offline enrollment job
-> (`rvc_engine.py` / `enrollment.py` — real content encoder, **synthesizer +
-> training still stubbed/passthrough**), frontend "Mirror" mode (`LiveMirror.tsx`).
-> Mounted in `app.py`; real engines gated by `HALLO4_LIVE_ENGINE=1` (else passthrough).
-> **Remaining to be "smooth + real voice":** TRT warp-split for 25+ fps, real
-> Wav2Lip mouth, real RVC synthesizer + training (avoid fairseq), A/V sync.
+> LivePortrait reenactment (`live_video_engine.py`), RVC engine + enrollment
+> (`rvc_engine.py`/`enrollment.py`), frontend "Mirror" mode (`LiveMirror.tsx`).
+> Mounted in `app.py`; real engines gated by `HALLO4_LIVE_ENGINE=1`.
+>
+> **Gaps closed (round 2):**
+> - **fps:** SPADE + motion-extractor on ORT-TensorRT + detection-skip → **~22.6 fps
+>   @256² video-only** (from ~9). Honest miss on 25: the warp's `dense_motion` is a
+>   ~22 ms eager wall — its **5D volumetric grid_sample** can't run on TRT (rejects
+>   `nbDims!=4`); crossing 25 needs a native 5D-GridSample TRT/CUDA plugin
+>   (FasterLivePortrait-style, out of scope) or deformation-caching (judder).
+> - **Wav2Lip:** real (vendored model + `wav2lip_gan.pth`, librosa mel, audio ring
+>   buffer) — mouth tracks speech; ~18.9 fps with it on every frame.
+> - **Voice:** real **streaming kNN-VC** (not seed-vc — its `torch==2.4.0` pin would
+>   wreck the CUDA-13 stack). Zero-shot timbre shift, ~1 s window latency, zero new
+>   deps. Enrollment stores the reference (no training); `stub=false`.
+> **Follow-ons:** native 5D-GridSample plugin for 25+ fps; tighter Wav2Lip crop;
+> vendored trained-RVC (lower latency) at the `TODO(rvc)` slots; A/V sync polish.
 >
 > **2a progress:**
 > - **Transport ✅** — `aiortc 1.14 + av 16.1` install cleanly (av bundles ffmpeg →
