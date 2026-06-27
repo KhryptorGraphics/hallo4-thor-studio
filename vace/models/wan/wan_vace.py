@@ -100,13 +100,13 @@ class WanVace(nn.Module):
         self.param_dtype = config.param_dtype
 
         shard_fn = partial(shard_model, device_id=device_id)
-        self.text_encoder = T5EncoderModel(
-            text_len=config.text_len,
-            dtype=config.t5_dtype,
-            device=self.device,     #cpu offload: device=torch.device("cpu")
-            checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
-            tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
-            shard_fn=shard_fn if t5_fsdp else None)
+        # Stash what _build_text_encoder needs so the 11 GB T5 can be freed after
+        # prompt encoding and lazily rebuilt only if a new prompt appears (batch).
+        self._checkpoint_dir = checkpoint_dir
+        self._device_id = device_id
+        self._t5_fsdp = t5_fsdp
+        self._text_cache = {}
+        self.text_encoder = self._build_text_encoder()
 
         self.vae_stride = config.vae_stride
         self.patch_size = config.patch_size
@@ -364,7 +364,26 @@ class WanVace(nn.Module):
 
         return self.vae.decode(trimed_zs)
 
+    def _build_text_encoder(self):
+        """(Re)build the T5 text encoder from the stashed checkpoint args."""
+        shard_fn = partial(shard_model, device_id=self._device_id)
+        return T5EncoderModel(
+            text_len=self.config.text_len,
+            dtype=self.config.t5_dtype,
+            device=self.device,
+            checkpoint_path=os.path.join(self._checkpoint_dir, self.config.t5_checkpoint),
+            tokenizer_path=os.path.join(self._checkpoint_dir, self.config.t5_tokenizer),
+            shard_fn=shard_fn if self._t5_fsdp else None)
 
+    def _free_text_encoder(self):
+        """Free the ~11 GB T5 encoder. Prompt embeddings are cached in
+        self._text_cache, so the (minutes-long) diffusion loop and later chunks
+        of the same prompt run without it. Critical on Thor's unified memory."""
+        if getattr(self, "text_encoder", None) is not None:
+            del self.text_encoder
+            self.text_encoder = None
+            gc.collect()
+            torch.cuda.empty_cache()
 
     def generate(self,
                  input_prompt,
@@ -423,17 +442,32 @@ class WanVace(nn.Module):
         seed_g = torch.Generator(device=self.device)
         seed_g.manual_seed(seed)
 
-        if not self.t5_cpu:
-            self.text_encoder.model.to(self.device)
-            context = self.text_encoder([input_prompt], self.device)
-            context_null = self.text_encoder([n_prompt], self.device)
-            if offload_model:
-                self.text_encoder.model.cpu()
+        # Encode the prompt once and cache it; T5 (~11 GB) is only needed for this
+        # one-time embed, not the diffusion loop, so free it afterwards to reclaim
+        # memory (Thor unified RAM). Cached embeddings serve later chunks of the
+        # same prompt; a new prompt (batch) lazily rebuilds T5. Disable with
+        # HALLO4_FREE_T5=0.
+        cache_key = (input_prompt, n_prompt)
+        cached = self._text_cache.get(cache_key)
+        if cached is not None:
+            context, context_null = cached
         else:
-            context = self.text_encoder([input_prompt], torch.device('cpu'))
-            context_null = self.text_encoder([n_prompt], torch.device('cpu'))
-            context = [t.to(self.device) for t in context]
-            context_null = [t.to(self.device) for t in context_null]
+            if self.text_encoder is None:
+                self.text_encoder = self._build_text_encoder()
+            if not self.t5_cpu:
+                self.text_encoder.model.to(self.device)
+                context = self.text_encoder([input_prompt], self.device)
+                context_null = self.text_encoder([n_prompt], self.device)
+                if offload_model:
+                    self.text_encoder.model.cpu()
+            else:
+                context = self.text_encoder([input_prompt], torch.device('cpu'))
+                context_null = self.text_encoder([n_prompt], torch.device('cpu'))
+                context = [t.to(self.device) for t in context]
+                context_null = [t.to(self.device) for t in context_null]
+            self._text_cache[cache_key] = (context, context_null)
+            if os.environ.get("HALLO4_FREE_T5", "1") == "1":
+                self._free_text_encoder()
 
         # vace context encode
         skeleton_frames = torch.stack(skeleton_frames, dim=0)
