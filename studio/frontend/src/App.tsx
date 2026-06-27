@@ -188,6 +188,17 @@ export default function App() {
     }
   }
 
+  // One-click auth: a ?token=... in the URL is stored, then stripped from the bar
+  // (so it isn't shoulder-surfed / left in history). Lets you bookmark an
+  // authenticated link instead of pasting the token under Preflight > Access.
+  useEffect(() => {
+    const urlToken = new URLSearchParams(window.location.search).get("token");
+    if (urlToken) {
+      setAuthToken(urlToken);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 3500);
