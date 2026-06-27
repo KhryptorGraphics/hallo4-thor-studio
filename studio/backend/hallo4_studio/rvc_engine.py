@@ -17,13 +17,14 @@ clip and writes ``reference.wav`` + ``model.json``; ``RVCEngine.load`` builds a
 resident converter and precomputes the target matching-set once.
 
 Streaming design (see :class:`RVCEngine`): a ring buffer accumulates incoming
-16k int16; once a ~1 s window fills it is converted and overlap-added (linear
+16k int16; once a ~0.4 s window fills it is converted and overlap-added (linear
 crossfade) into an output buffer emitted at the input rate, so each
 ``convert_chunk`` returns int16 of the *same length* as its input (the live
 session advances its audio pts by that length). Added latency ≈ one window
-(~1 s). Before the first window fills, or with no/failed model, audio passes
-through unchanged. ``convert_chunk`` never raises — a bad frame must not kill
-the session.
+(~0.4 s; tunable via HALLO4_RVC_WIN — compute is only ~12 ms, so the window is
+the latency lever). Before the first window fills, or with no/failed model,
+audio passes through unchanged. ``convert_chunk`` never raises — a bad frame
+must not kill the session.
 
 TODO(rvc): a vendored *trained* RVC (per-voice ``net_g`` + RMVPE f0) could cut
 latency / raise fidelity below zero-shot, but is install-fragile on
@@ -52,14 +53,16 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
 
-# Streaming analysis window / hop for kNN-VC. ~1 s window gives WavLM enough
-# context for a stable conversion; a 50% hop converts a fresh window every
-# ~0.5 s, overlap-added with a linear crossfade so the stream stays continuous.
-# Priming / added latency ≈ one window (~1 s), independent of the hop.
-# ponytail: fixed 1.0s/0.5s. Knobs: lower _STREAM_WIN to cut latency (watch WavLM
-# context); raise _STREAM_HOP to cut compute (fewer windows) at some smoothness cost.
-_STREAM_WIN = 16000
-_STREAM_HOP = 8000
+# Streaming analysis window / hop for kNN-VC. Added latency ≈ one window, so the
+# window is the latency lever (compute is ~12 ms regardless — RTF ~0.03). Measured
+# quality floor on Thor: out_rms tracks the source down to ~0.32 s, then collapses
+# (<0.2 s windows vocode to near-silence — WavLM/HiFiGAN need a minimum context).
+# So 0.40 s is the low-latency sweet spot (safely above the floor): ~0.4 s latency,
+# ~2.5x better than the old 1.0 s, quality intact. Env-tunable for experimentation.
+# ponytail: shrinking the window is the whole win here; a context-window /
+# emit-newest-hop redesign could reach ~0.16 s but adds alignment/artifact risk.
+_STREAM_WIN = int(os.getenv("HALLO4_RVC_WIN", "6400"))   # 0.40 s WavLM context
+_STREAM_HOP = int(os.getenv("HALLO4_RVC_HOP", "3200"))   # 0.20 s (50% overlap)
 # Windows quieter than this (RMS, ~-80 dBFS) emit silence instead of letting
 # HiFiGAN hallucinate target breath/hiss into the gaps between words.
 _SILENCE_RMS = 1e-4

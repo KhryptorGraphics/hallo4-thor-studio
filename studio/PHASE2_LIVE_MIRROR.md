@@ -20,8 +20,10 @@
 > - **Wav2Lip:** real (vendored model + `wav2lip_gan.pth`, librosa mel, audio ring
 >   buffer) — mouth tracks speech; ~18.9 fps with it on every frame.
 > - **Voice:** real **streaming kNN-VC** (not seed-vc — its `torch==2.4.0` pin would
->   wreck the CUDA-13 stack). Zero-shot timbre shift, ~1 s window latency, zero new
->   deps. Enrollment stores the reference (no training); `stub=false`.
+>   wreck the CUDA-13 stack). Zero-shot timbre shift, **~0.4 s latency** (cut from ~1 s
+>   — compute is only ~12 ms so the analysis window is the lever; 0.4 s is the measured
+>   low-latency floor before WavLM/HiFiGAN vocode to silence; tunable via
+>   `HALLO4_RVC_WIN`), zero new deps. Enrollment stores the reference (no training).
 > **Follow-ons:** native 5D-GridSample plugin for 25+ fps; tighter Wav2Lip crop;
 > vendored trained-RVC (lower latency) at the `TODO(rvc)` slots; A/V sync polish.
 >
