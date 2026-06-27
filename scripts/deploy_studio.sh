@@ -77,10 +77,14 @@ RestartSec=5
 WantedBy=default.target
 EOF
 
-# 5. Enable + (re)start.
+# 5. (Re)start now. Boot autostart is OFF by default — opt in with HALLO4_STUDIO_BOOT=1.
 systemctl --user daemon-reload
-systemctl --user enable --now "$UNIT"
-systemctl --user restart "$UNIT"   # pick up code/cert changes on re-deploy
+if [ "${HALLO4_STUDIO_BOOT:-0}" = "1" ]; then
+  systemctl --user enable "$UNIT"
+else
+  systemctl --user disable "$UNIT" 2>/dev/null || true
+fi
+systemctl --user restart "$UNIT"   # start now + pick up code/cert changes
 sleep 4
 
 LAN="$(hostname -I | awk '{print $1}')"
