@@ -70,6 +70,9 @@ EnvironmentFile=-$ENV_FILE
 ExecStart=$CONDA run --no-capture-output -n $ENV_NAME uvicorn studio.backend.hallo4_studio.app:app \\
   --host 0.0.0.0 --port $PORT \\
   --ssl-keyfile $CERT_DIR/studio.key --ssl-certfile $CERT_DIR/studio.crt
+# Cap memory so a leak OOM-kills+restarts only this service, never the shared box.
+MemoryHigh=${HALLO4_STUDIO_MEM_HIGH:-24G}
+MemoryMax=${HALLO4_STUDIO_MEM_MAX:-32G}
 Restart=on-failure
 RestartSec=5
 
